@@ -274,9 +274,10 @@ with col_filters:
 
     # Período de compra
     st.markdown("**Período de compra**")
-    if "order_date" in df.columns:
-        min_d = df["order_date"].min()
-        max_d = df["order_date"].max()
+    valid_dates = df["order_date"].dropna() if "order_date" in df.columns else pd.Series([], dtype=object)
+    if not valid_dates.empty:
+        min_d = valid_dates.min()
+        max_d = valid_dates.max()
         if min_d < max_d:
             date_range = st.slider(
                 "Período", min_value=min_d, max_value=max_d,
