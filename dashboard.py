@@ -428,18 +428,19 @@ with col_main:
             col_l, col_r = st.columns(2)
 
             vol_ev = (
-                dff.groupby(["event_name", "deal_title"])
-                .agg(ingressos=("ticket_id", "count"), receita=("deal_price_brl", "sum"))
-                .reset_index()
+                dff.groupby("event_name")
+                .agg(receita=("deal_price_brl", "sum"))
+                .reset_index().sort_values("receita", ascending=False)
             )
             fig2 = px.bar(
-                vol_ev, x="event_name", y="ingressos", color="deal_title",
-                barmode="stack",
-                labels={"event_name": "Evento", "ingressos": "Ingressos", "deal_title": "Categoria"},
-                title="Volume de Ingressos por Evento e Categoria",
-                color_discrete_sequence=COLORS,
+                vol_ev, x="event_name", y="receita",
+                labels={"event_name": "Evento", "receita": "Receita (BRL)"},
+                title="Receita por Evento",
+                color="event_name", color_discrete_sequence=COLORS,
+                text="receita",
             )
-            fig2.update_layout(xaxis_tickangle=-20, legend=dict(orientation="h", y=-0.3))
+            fig2.update_traces(texttemplate="R$%{text:,.0f}", textposition="outside")
+            fig2.update_layout(showlegend=False, xaxis_tickangle=-20)
             col_l.plotly_chart(fig2, use_container_width=True)
 
             rev_tier = (
