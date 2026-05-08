@@ -3,6 +3,8 @@ Shotgun Event Analytics Dashboard
 Run with: python -m streamlit run dashboard.py
 """
 
+import json
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -139,6 +141,135 @@ def load_csv(source) -> pd.DataFrame:
     return process(pd.read_csv(source))
 
 
+# ── Porta (vendas externas: dinheiro / PagBank) ───────────────────────────────
+
+PORTA_PATH = Path(__file__).parent / "porta_entries.json"
+
+
+def load_porta() -> list[dict]:
+    if not PORTA_PATH.is_file():
+        return []
+    try:
+        return json.loads(PORTA_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def save_porta(entries: list[dict]) -> None:
+    PORTA_PATH.write_text(
+        json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def append_porta_entry(
+    event_name: str,
+    tickets: int,
+    revenue_brl: float,
+    source: str,
+    prices: list[float] | None = None,
+    entry_date=None,
+) -> None:
+    entries = load_porta()
+    record: dict = {
+        "event_name": event_name,
+        "tickets": int(tickets),
+        "revenue_brl": float(revenue_brl),
+        "source": source,
+        "added_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    if prices:
+        record["prices"] = [float(p) for p in prices]
+    if entry_date is not None:
+        record["date"] = entry_date.isoformat() if hasattr(entry_date, "isoformat") else str(entry_date)
+    entries.append(record)
+    save_porta(entries)
+
+
+def _read_pagbank(file) -> pd.DataFrame:
+    file.seek(0)
+    raw = pd.read_csv(file, skiprows=8)
+    raw.columns = [c.strip() for c in raw.columns]
+    raw = raw[raw["Tipo"].astype(str).str.strip() == "Vendas"].copy()
+    raw["Entradas"] = pd.to_numeric(raw["Entradas"], errors="coerce")
+    raw = raw[raw["Entradas"].notna() & (raw["Entradas"] > 0)]
+    raw["Data"] = pd.to_datetime(raw["Data"], format="%d/%m/%Y", errors="coerce").dt.date
+    raw = raw[raw["Data"].notna()]
+    return raw
+
+
+def parse_pagbank_csv(file) -> tuple[int, float, list[float]]:
+    sales = _read_pagbank(file)
+    prices = sales["Entradas"].astype(float).tolist()
+    return len(prices), float(sum(prices)), prices
+
+
+def parse_pagbank_csv_by_date(file) -> dict:
+    sales = _read_pagbank(file)
+    out: dict = {}
+    for d, group in sales.groupby("Data"):
+        prices = group["Entradas"].astype(float).tolist()
+        out[d] = (len(prices), float(sum(prices)), prices)
+    return out
+
+
+def porta_totals_by_event(entries: list[dict]) -> pd.DataFrame:
+    if not entries:
+        return pd.DataFrame(columns=["event_name", "porta_tickets", "porta_revenue"])
+    df = pd.DataFrame(entries)
+    return (
+        df.groupby("event_name", as_index=False)
+        .agg(porta_tickets=("tickets", "sum"), porta_revenue=("revenue_brl", "sum"))
+    )
+
+
+def expand_porta_to_rows(entries: list[dict], shotgun_df: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Expand Porta aggregate entries into one row per ticket, matching shotgun_df schema."""
+    if not entries:
+        return pd.DataFrame()
+
+    # Map event_name → event_start_time (date) for fallback order_date on manual entries
+    event_dates: dict = {}
+    if shotgun_df is not None and "event_name" in shotgun_df and "event_start_time" in shotgun_df:
+        for ev, grp in shotgun_df.groupby("event_name"):
+            d = grp["event_start_time"].dropna()
+            if not d.empty:
+                event_dates[ev] = d.min().date()
+
+    rows: list[dict] = []
+    for entry in entries:
+        evt    = entry["event_name"]
+        n      = int(entry.get("tickets", 0))
+        rev    = float(entry.get("revenue_brl", 0.0))
+        prices = entry.get("prices")
+        # Resolve order_date: explicit "date" → event_start_time → today
+        if entry.get("date"):
+            try:
+                order_d = datetime.fromisoformat(entry["date"]).date()
+            except Exception:
+                order_d = None
+        else:
+            order_d = None
+        if order_d is None:
+            order_d = event_dates.get(evt) or datetime.now().date()
+
+        if prices and len(prices) == n:
+            ticket_prices = [float(p) for p in prices]
+        else:
+            avg = (rev / n) if n else 0.0
+            ticket_prices = [avg] * n
+
+        for p in ticket_prices:
+            rows.append({
+                "event_name":     evt,
+                "deal_price_brl": p,
+                "ticket_status":  "valid",
+                "source":         "Porta",
+                "order_date":     order_d,
+            })
+
+    return pd.DataFrame(rows)
+
+
 # ── Sidebar esquerda — fonte de dados ─────────────────────────────────────────
 with st.sidebar:
     st.markdown("## 🎟️ Shotgun Analytics")
@@ -195,7 +326,166 @@ with st.sidebar:
         st.caption(f"Fonte: {st.session_state.get('source_label', '')}")
 
     st.divider()
-    st.caption("Gostou? Pix e sugestões para gustavobaida@gmail.com")
+
+    with st.expander("🚪 Adicionar Ingressos Porta"):
+        if "df" not in st.session_state:
+            st.caption("Carregue os dados do Shotgun primeiro.")
+        else:
+            _events = sorted(st.session_state["df"]["event_name"].dropna().unique().tolist())
+            mode = st.radio(
+                "Modo de entrada", ["Manual", "CSV PagBank"],
+                horizontal=True, key="porta_mode",
+            )
+
+            if mode == "Manual":
+                evt = st.selectbox(
+                    "Evento", _events, key="porta_evt_manual",
+                    index=None, placeholder="Selecione...",
+                )
+                n = st.number_input("Número de ingressos", min_value=1, step=1, key="porta_n")
+                v = st.number_input(
+                    "Valor total (R$)", min_value=0.0, step=0.01,
+                    format="%.2f", key="porta_v",
+                )
+                if st.button(
+                    "Adicionar", use_container_width=True, type="primary",
+                    disabled=evt is None, key="porta_add_manual",
+                ):
+                    append_porta_entry(evt, int(n), float(v), "manual")
+                    st.success(f"Adicionado: {int(n)} ingressos / R${float(v):,.2f} para {evt}")
+                    st.rerun()
+
+            else:
+                scope = st.radio(
+                    "Escopo", ["Evento Único", "Vários Eventos"],
+                    horizontal=True, key="porta_scope",
+                )
+                up = st.file_uploader(
+                    "Extrato PagBank (.csv)", type="csv", key="porta_csv",
+                )
+                if up is not None:
+                    if scope == "Evento Único":
+                        evt = st.selectbox(
+                            "Evento", _events, key="porta_evt_csv",
+                            index=None, placeholder="Selecione...",
+                        )
+                        try:
+                            n_csv, v_csv, prices_csv = parse_pagbank_csv(up)
+                            st.caption(f"Detectado: {n_csv} vendas / R${v_csv:,.2f}")
+                            if st.button(
+                                "Adicionar", use_container_width=True, type="primary",
+                                disabled=evt is None, key="porta_add_csv_single",
+                            ):
+                                append_porta_entry(
+                                    evt, n_csv, v_csv, "pagbank_csv",
+                                    prices=prices_csv,
+                                )
+                                st.success(f"Adicionado: {n_csv} ingressos / R${v_csv:,.2f} para {evt}")
+                                st.rerun()
+                        except Exception as e:
+                            st.error(f"Erro ao ler CSV PagBank: {e}")
+                    else:
+                        try:
+                            by_date = parse_pagbank_csv_by_date(up)
+                            if not by_date:
+                                st.warning("Nenhuma venda detectada no CSV.")
+                            else:
+                                st.caption(
+                                    f"Detectadas {len(by_date)} datas com vendas. "
+                                    "Atribua um evento a cada data:"
+                                )
+                                _IGNORE = "(ignorar)"
+                                assignments: dict = {}
+                                for d, (n_d, v_d, _p) in sorted(by_date.items()):
+                                    assignments[d] = st.selectbox(
+                                        f"{d.strftime('%d/%m/%Y')} — {n_d} vendas / R${v_d:,.2f}",
+                                        [_IGNORE] + _events,
+                                        key=f"porta_date_{d.isoformat()}",
+                                    )
+                                if st.button(
+                                    "Adicionar", use_container_width=True, type="primary",
+                                    key="porta_add_csv_multi",
+                                ):
+                                    added = 0
+                                    for d, evt_pick in assignments.items():
+                                        if evt_pick != _IGNORE:
+                                            n_d, v_d, prices_d = by_date[d]
+                                            append_porta_entry(
+                                                evt_pick, n_d, v_d, "pagbank_csv",
+                                                prices=prices_d, entry_date=d,
+                                            )
+                                            added += 1
+                                    if added:
+                                        st.success(f"{added} entradas adicionadas.")
+                                        st.rerun()
+                                    else:
+                                        st.info("Nenhuma data foi atribuída a um evento.")
+                        except Exception as e:
+                            st.error(f"Erro ao ler CSV PagBank: {e}")
+
+        _porta_existing = load_porta()
+        if _porta_existing:
+            st.caption(f"{len(_porta_existing)} entradas Porta salvas.")
+            if st.button("🗑️ Limpar Porta", use_container_width=True, key="porta_clear"):
+                save_porta([])
+                st.rerun()
+
+    st.divider()
+    with st.expander("📥 Carregar dados consolidados"):
+        st.caption(
+            "Restaura um CSV exportado em **Baixar dados consolidados** "
+            "(Shotgun + Porta unificados)."
+        )
+        consolidated = st.file_uploader(
+            "CSV consolidado", type="csv", key="consolidated_upload",
+            label_visibility="collapsed",
+        )
+        if consolidated is not None:
+            _file_token = f"{consolidated.name}:{consolidated.size}"
+            if st.session_state.get("_consolidated_processed") != _file_token:
+                try:
+                    full_df = pd.read_csv(consolidated)
+                    if "source" not in full_df.columns:
+                        st.error("Este CSV não parece ser consolidado (faltam a coluna 'source').")
+                    else:
+                        sg_part    = full_df[full_df["source"] == "Shotgun"].drop(columns=["source"]).copy()
+                        porta_part = full_df[full_df["source"] == "Porta"].copy()
+
+                        new_entries: list[dict] = []
+                        for evt, grp in porta_part.groupby("event_name"):
+                            prices = [float(p) for p in grp["deal_price_brl"].tolist()]
+                            new_entries.append({
+                                "event_name":  evt,
+                                "tickets":     len(prices),
+                                "revenue_brl": float(sum(prices)),
+                                "prices":      prices,
+                                "source":      "consolidated_upload",
+                                "added_at":    datetime.now().isoformat(timespec="seconds"),
+                            })
+
+                        st.session_state["df"] = process(sg_part)
+                        st.session_state["source_label"] = (
+                            f"Consolidado — {consolidated.name} "
+                            f"({len(sg_part):,} Shotgun + {len(porta_part):,} Porta)"
+                        )
+                        save_porta(new_entries)
+                        st.session_state["_consolidated_processed"] = _file_token
+                        st.success(
+                            f"Restaurado: {len(sg_part):,} ingressos Shotgun e "
+                            f"{len(new_entries)} entradas Porta."
+                        )
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Erro ao ler o CSV consolidado: {e}")
+            else:
+                st.caption(f"✓ Já carregado: {consolidated.name}")
+
+    st.divider()
+    st.caption(
+        "Gostou? Sugira novas funcionalidades "
+        "[aqui](https://docs.google.com/spreadsheets/d/1zu40CkqlMhMVPAPITPiAqoNPBP_eSGptYlPYvtAJPHs/edit?usp=sharing)"
+    )
+    st.caption("Gostou muito? PIX para gustavobaida@gmail.com")
 
 
 # ── Tela de boas-vindas ────────────────────────────────────────────────────────
@@ -239,17 +529,28 @@ Ou envie um arquivo `.csv` exportado anteriormente diretamente pela barra latera
 
 
 # ── Layout principal: conteúdo + filtros à direita ────────────────────────────
-df = st.session_state["df"]
+df_shotgun = st.session_state["df"].copy()
+df_shotgun["source"] = "Shotgun"
+
+_porta_entries = load_porta()
+df_porta_rows  = expand_porta_to_rows(_porta_entries, df_shotgun)
+has_porta_data = not df_porta_rows.empty
+
+if has_porta_data:
+    df = pd.concat([df_shotgun, df_porta_rows], ignore_index=True)
+else:
+    df = df_shotgun
+
 col_main, col_filters = st.columns([5, 1])
 
 # ── Filtros (coluna direita) ───────────────────────────────────────────────────
 with col_filters:
     st.markdown("### Filtros")
 
-    # Checklist de eventos
+    # Checklist de eventos (a partir do Shotgun — Porta usa os mesmos nomes)
     st.markdown("**Eventos**")
     events_info = (
-        df[["event_id", "event_name"]].drop_duplicates()
+        df_shotgun[["event_id", "event_name"]].drop_duplicates()
         .sort_values("event_name").reset_index(drop=True)
     )
     ca, cb = st.columns(2)
@@ -274,6 +575,19 @@ with col_filters:
 
     if not sel_events:
         sel_events = events_info["event_name"].tolist()
+
+    # Canal (Shotgun / Porta) — só aparece quando há dados de Porta
+    if has_porta_data:
+        st.markdown("**Canal**")
+        sel_channels = st.multiselect(
+            "Canal", ["Shotgun", "Porta"],
+            default=["Shotgun", "Porta"],
+            label_visibility="collapsed",
+        )
+        if not sel_channels:
+            sel_channels = ["Shotgun", "Porta"]
+    else:
+        sel_channels = ["Shotgun"]
 
     # Período de compra
     st.markdown("**Período de compra**")
@@ -302,11 +616,29 @@ with col_filters:
     )
 
 # ── Aplicar filtros ────────────────────────────────────────────────────────────
-mask = df["event_name"].isin(sel_events) & df["ticket_status"].isin(sel_statuses)
+mask = (
+    df["event_name"].isin(sel_events)
+    & df["ticket_status"].isin(sel_statuses)
+    & df["source"].isin(sel_channels)
+)
 if date_range and "order_date" in df.columns:
     mask &= df["order_date"].between(date_range[0], date_range[1])
 dff    = df[mask].copy()
 df_sel = df[df["event_name"].isin(sel_events)].copy()
+# Subconjunto apenas Shotgun — usado para KPIs/abas que dependem de campos
+# que Porta não possui (utm, contact, scan, cancelamento).
+dff_shotgun = dff[dff["source"] == "Shotgun"].copy()
+
+# Botão de download (anexado à coluna de filtros, abaixo de tudo)
+with col_filters:
+    st.divider()
+    st.download_button(
+        "📥 Baixar dados consolidados",
+        data=dff.to_csv(index=False).encode("utf-8"),
+        file_name=f"shotgun_porta_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
 
 
 # ── Conteúdo principal (coluna esquerda) ──────────────────────────────────────
@@ -317,16 +649,21 @@ with col_main:
         st.stop()
 
     # ── KPIs ──────────────────────────────────────────────────────────────────
+    # Cross-channel: somam Shotgun + Porta (quando ambos selecionados)
     total_tickets    = len(dff)
-    unique_attendees = dff["contact_id"].nunique()
+    unique_attendees = dff["contact_id"].nunique() if "contact_id" in dff else 0
     total_revenue    = dff["deal_price_brl"].sum() if "deal_price_brl" in dff else 0
-    total_canceled   = (df_sel["ticket_status"] == "canceled").sum()
-    cancel_rate      = total_canceled / len(df_sel) * 100 if len(df_sel) else 0
-    scanned          = dff["ticket_scanned_at"].notna().sum()
-    scan_rate        = scanned / total_tickets * 100 if total_tickets else 0
-    newsletter_rate  = (
-        dff["contact_newsletter_optin"].sum() / dff["contact_newsletter_optin"].notna().sum() * 100
-        if "contact_newsletter_optin" in dff and dff["contact_newsletter_optin"].notna().sum() > 0
+
+    # Shotgun-only: campos que Porta não tem (scan, cancel, newsletter)
+    df_sel_sg = df_sel[df_sel["source"] == "Shotgun"]
+    total_canceled  = (df_sel_sg["ticket_status"] == "canceled").sum()
+    cancel_rate     = total_canceled / len(df_sel_sg) * 100 if len(df_sel_sg) else 0
+    sg_total        = len(dff_shotgun)
+    scanned         = dff_shotgun["ticket_scanned_at"].notna().sum() if "ticket_scanned_at" in dff_shotgun else 0
+    scan_rate       = scanned / sg_total * 100 if sg_total else 0
+    newsletter_rate = (
+        dff_shotgun["contact_newsletter_optin"].sum() / dff_shotgun["contact_newsletter_optin"].notna().sum() * 100
+        if "contact_newsletter_optin" in dff_shotgun and dff_shotgun["contact_newsletter_optin"].notna().sum() > 0
         else 0
     )
 
@@ -343,9 +680,23 @@ with col_main:
     st.divider()
 
     # ── Abas ──────────────────────────────────────────────────────────────────
-    tab_compare, tab_sales, tab_revenue, tab_marketing, tab_audience, tab_ops = st.tabs([
-        "📊 Comparar", "📈 Vendas", "💰 Receita", "📣 Marketing", "👥 Público", "🔍 Operações"
-    ])
+    porta_df = porta_totals_by_event(_porta_entries)
+    porta_df = porta_df[porta_df["event_name"].isin(sel_events)].copy()
+
+    shotgun_in = "Shotgun" in sel_channels
+    porta_in   = "Porta" in sel_channels
+    # Aba Porta (comparação) só faz sentido com ambos os canais selecionados
+    show_porta = porta_in and shotgun_in and not porta_df.empty
+
+    _tab_labels = ["📊 Comparar", "📈 Vendas", "💰 Receita", "📣 Marketing", "👥 Público", "🔍 Operações"]
+    if show_porta:
+        _tab_labels.append("🚪 Porta")
+    _tabs = st.tabs(_tab_labels)
+    tab_compare, tab_sales, tab_revenue, tab_marketing, tab_audience, tab_ops = _tabs[:6]
+    tab_porta = _tabs[6] if show_porta else None
+
+    # Alias para restaurar `dff` após abas que precisam usar somente Shotgun
+    _dff_all = dff
 
     # ══════════════════════════════════════════════════════════════════════════
     # ABA 1 — VENDAS
@@ -469,12 +820,13 @@ with col_main:
         summary = (
             df_sel.groupby("event_name").agg(
                 total=("ticket_id", "count"),
-                validos=("ticket_status", lambda x: (x == "valid").sum()),
-                cancelados=("ticket_status", lambda x: (x == "canceled").sum()),
-                lidos=("ticket_scanned_at", lambda x: x.notna().sum()),
+                validos=("ticket_status", lambda x: int((x == "valid").sum())),
+                cancelados=("ticket_status", lambda x: int((x == "canceled").sum())),
+                lidos=("ticket_scanned_at", "count"),
                 receita=("deal_price_brl", "sum"),
             ).reset_index()
         )
+        summary["lidos"] = summary["lidos"].astype(int)
         summary = summary.merge(event_dates[["event_name", "dias_de_vendas"]], on="event_name", how="left")
         summary["taxa_presenca"]     = (summary["lidos"] / summary["validos"] * 100).round(1).astype(str) + "%"
         summary["taxa_cancelamento"] = (summary["cancelados"] / summary["total"] * 100).round(1).astype(str) + "%"
@@ -590,6 +942,9 @@ with col_main:
     # ABA 3 — MARKETING
     # ══════════════════════════════════════════════════════════════════════════
     with tab_marketing:
+        dff = dff_shotgun
+        if dff.empty:
+            st.info("Sem dados Shotgun para os filtros selecionados (Canal Shotgun pode estar desligado).")
         col_l, col_r = st.columns(2)
 
         if "utm_source" in dff.columns:
@@ -639,6 +994,9 @@ with col_main:
     # ABA 4 — PÚBLICO
     # ══════════════════════════════════════════════════════════════════════════
     with tab_audience:
+        dff = dff_shotgun
+        if dff.empty:
+            st.info("Sem dados Shotgun para os filtros selecionados (Canal Shotgun pode estar desligado).")
         col_l, col_r = st.columns(2)
 
         if "contact_gender" in dff.columns:
@@ -767,6 +1125,9 @@ with col_main:
     # ABA 5 — OPERAÇÕES
     # ══════════════════════════════════════════════════════════════════════════
     with tab_ops:
+        dff = dff_shotgun
+        if dff.empty:
+            st.info("Sem dados Shotgun para os filtros selecionados (Canal Shotgun pode estar desligado).")
         col_l, col_r = st.columns(2)
 
         dff["_ticket_type"] = (
@@ -777,9 +1138,11 @@ with col_main:
 
         scan_ev = dff.groupby(["event_name", "_ticket_type"]).agg(
             total=("ticket_id", "count"),
-            presentes=("ticket_scanned_at", lambda x: x.notna().sum()),
+            presentes=("ticket_scanned_at", "count"),
         ).reset_index()
-        scan_ev["ausentes"] = scan_ev["total"] - scan_ev["presentes"]
+        scan_ev["total"]     = scan_ev["total"].astype(int)
+        scan_ev["presentes"] = scan_ev["presentes"].astype(int)
+        scan_ev["ausentes"]  = scan_ev["total"] - scan_ev["presentes"]
 
         events_order = (
             scan_ev.groupby("event_name")["total"].sum()
@@ -859,6 +1222,9 @@ with col_main:
         )
         fig4.update_layout(xaxis_tickangle=-20, legend=dict(orientation="h", y=-0.3))
         col_r.plotly_chart(fig4, use_container_width=True)
+
+    # Restaura dff completo (Shotgun + Porta) para abas de comparação
+    dff = _dff_all
 
     # ══════════════════════════════════════════════════════════════════════════
     # ABA 6 — COMPARAR EVENTO
@@ -1126,3 +1492,97 @@ with col_main:
                     legend=dict(orientation="h", y=-0.25),
                 )
                 col_r4.plotly_chart(fig_racum, use_container_width=True)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # ABA 7 — PORTA (somente quando há dados de Porta)
+    # ══════════════════════════════════════════════════════════════════════════
+    if tab_porta is not None:
+        with tab_porta:
+            shotgun_by_event = (
+                dff_shotgun.groupby("event_name")
+                .agg(
+                    shotgun_tickets=("event_name", "size"),
+                    shotgun_revenue=("deal_price_brl", "sum"),
+                )
+                .reset_index()
+            )
+            comp = shotgun_by_event.merge(porta_df, on="event_name", how="outer").fillna(0)
+
+            total_shotgun_rev = float(comp["shotgun_revenue"].sum())
+            total_porta_rev   = float(comp["porta_revenue"].sum())
+            total_shotgun_tk  = int(comp["shotgun_tickets"].sum())
+            total_porta_tk    = int(comp["porta_tickets"].sum())
+
+            st.subheader("Totais — Shotgun vs Porta")
+            col_l, col_r = st.columns(2)
+
+            fig_rev_total = px.bar(
+                pd.DataFrame({
+                    "Canal": ["Shotgun", "Porta"],
+                    "Receita (R$)": [total_shotgun_rev, total_porta_rev],
+                }),
+                x="Canal", y="Receita (R$)", text_auto=".2f",
+                color="Canal",
+                color_discrete_map={"Shotgun": COLORS[0], "Porta": COLORS[1]},
+            )
+            fig_rev_total.update_layout(
+                title="Receita Total", showlegend=False,
+            )
+            col_l.plotly_chart(fig_rev_total, use_container_width=True)
+
+            fig_tk_total = px.bar(
+                pd.DataFrame({
+                    "Canal": ["Shotgun", "Porta"],
+                    "Ingressos": [total_shotgun_tk, total_porta_tk],
+                }),
+                x="Canal", y="Ingressos", text_auto=True,
+                color="Canal",
+                color_discrete_map={"Shotgun": COLORS[0], "Porta": COLORS[1]},
+            )
+            fig_tk_total.update_layout(
+                title="Ingressos Vendidos", showlegend=False,
+            )
+            col_r.plotly_chart(fig_tk_total, use_container_width=True)
+
+            st.divider()
+            st.subheader("Receita por Evento (Shotgun + Porta)")
+            comp_long_rev = comp.melt(
+                id_vars="event_name",
+                value_vars=["shotgun_revenue", "porta_revenue"],
+                var_name="Canal", value_name="Receita (R$)",
+            )
+            comp_long_rev["Canal"] = comp_long_rev["Canal"].map({
+                "shotgun_revenue": "Shotgun", "porta_revenue": "Porta",
+            })
+            fig_rev_evt = px.bar(
+                comp_long_rev,
+                x="event_name", y="Receita (R$)", color="Canal",
+                color_discrete_map={"Shotgun": COLORS[0], "Porta": COLORS[1]},
+                barmode="stack",
+            )
+            fig_rev_evt.update_layout(
+                xaxis_title="Evento", xaxis_tickangle=-20,
+                legend=dict(orientation="h", y=-0.25),
+            )
+            st.plotly_chart(fig_rev_evt, use_container_width=True)
+
+            st.subheader("Ingressos por Evento (Shotgun + Porta)")
+            comp_long_tk = comp.melt(
+                id_vars="event_name",
+                value_vars=["shotgun_tickets", "porta_tickets"],
+                var_name="Canal", value_name="Ingressos",
+            )
+            comp_long_tk["Canal"] = comp_long_tk["Canal"].map({
+                "shotgun_tickets": "Shotgun", "porta_tickets": "Porta",
+            })
+            fig_tk_evt = px.bar(
+                comp_long_tk,
+                x="event_name", y="Ingressos", color="Canal",
+                color_discrete_map={"Shotgun": COLORS[0], "Porta": COLORS[1]},
+                barmode="stack",
+            )
+            fig_tk_evt.update_layout(
+                xaxis_title="Evento", xaxis_tickangle=-20,
+                legend=dict(orientation="h", y=-0.25),
+            )
+            st.plotly_chart(fig_tk_evt, use_container_width=True)
