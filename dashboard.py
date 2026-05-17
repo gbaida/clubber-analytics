@@ -986,19 +986,10 @@ with col_filters:
     else:
         date_range = None
 
-    # Status
-    st.markdown("**Status do ingresso**")
-    all_statuses = sorted(df["ticket_status"].dropna().unique())
-    sel_statuses = st.multiselect(
-        "Status", all_statuses,
-        default=[s for s in all_statuses if s != "canceled"],
-        label_visibility="collapsed",
-    )
-
 # ── Aplicar filtros ────────────────────────────────────────────────────────────
 mask = (
     df["event_name"].isin(sel_events)
-    & df["ticket_status"].isin(sel_statuses)
+    & (df["ticket_status"] != "canceled")
     & df["source"].isin(sel_channels)
 )
 if date_range and "order_date" in df.columns:
