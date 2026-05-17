@@ -1577,14 +1577,12 @@ with col_main:
             barmode="stack", title="Comparecimento por Evento",
             xaxis={"categoryorder": "array", "categoryarray": events_order, "tickangle": -20},
             legend=dict(
-                orientation="v", x=1.0, y=1.0,
-                xanchor="right", yanchor="top",
-                bgcolor="rgba(0,0,0,0.4)",
+                orientation="v", x=0.55, y=1.18,
+                xanchor="left", yanchor="top",
             ),
             legend2=dict(
-                orientation="v", x=1.0, y=0.55,
-                xanchor="right", yanchor="top",
-                bgcolor="rgba(0,0,0,0.4)",
+                orientation="v", x=0.78, y=1.18,
+                xanchor="left", yanchor="top",
             ),
         )
         col_l.plotly_chart(fig, use_container_width=True)
