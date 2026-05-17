@@ -491,8 +491,7 @@ if _sb_is_configured():
         _url_rt = st.query_params.get("_sb_rt", "")
         if _url_rt:
             try:
-                _ref = _sb.auth._call_refresh_token(_url_rt)
-                _sb.auth._save_session(_ref.session)
+                _ref = _sb.auth.refresh_session(_url_rt)   # AuthResponse
                 _sb_user = _ref.user
                 st.session_state["sb_access_token"] = _ref.session.access_token
                 st.session_state["sb_refresh_token"] = _ref.session.refresh_token
