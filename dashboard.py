@@ -1555,7 +1555,13 @@ with col_main:
             sub = scan_ev[scan_ev["_ticket_type"] == ttype]
             if sub.empty:
                 continue
-            for status, col_name in [("Presente", "presentes"), ("Ausente", "ausentes")]:
+            _leg_id = "legend" if ttype == "Pago" else "legend2"
+            # Presente adicionado primeiro → fundo da barra (visualmente correto)
+            # legendrank controla a ordem na legenda: Ausente=1 (topo), Presente=2 (abaixo)
+            for status, col_name, lrank in [
+                ("Presente", "presentes", 2),
+                ("Ausente",  "ausentes",  1),
+            ]:
                 fig.add_trace(go.Bar(
                     name=f"{ttype} – {status}",
                     x=sub["event_name"],
@@ -1564,11 +1570,20 @@ with col_main:
                     text=sub[col_name],
                     textposition="inside",
                     offsetgroup=ttype,
+                    legend=_leg_id,
+                    legendrank=lrank,
                 ))
         fig.update_layout(
             barmode="stack", title="Comparecimento por Evento",
             xaxis={"categoryorder": "array", "categoryarray": events_order, "tickangle": -20},
-            legend=dict(orientation="h", y=-0.3),
+            legend=dict(
+                orientation="v", x=0.0, y=-0.18,
+                xanchor="left", yanchor="top",
+            ),
+            legend2=dict(
+                orientation="v", x=0.25, y=-0.18,
+                xanchor="left", yanchor="top",
+            ),
         )
         col_l.plotly_chart(fig, use_container_width=True)
 
