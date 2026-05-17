@@ -179,7 +179,11 @@ def process(df: pd.DataFrame) -> pd.DataFrame:
         ).dt.total_seconds() / 86400
 
     if "ordered_at" in df.columns:
-        df["order_date"] = df["ordered_at"].dt.date
+        # Use .apply so missing rows become None (not NaT).
+        # NaT in an object-dtype column breaks groupby min/max in pandas 2.x.
+        df["order_date"] = df["ordered_at"].apply(
+            lambda ts: ts.date() if pd.notna(ts) else None
+        )
         df["order_hour"] = df["ordered_at"].dt.hour
         df["order_dow"]  = df["ordered_at"].dt.day_name()
 
