@@ -1165,10 +1165,24 @@ with col_main:
 
         st.subheader("Resumo por Evento")
 
-        event_dates = df_sel.groupby("event_name").agg(
-            primeira_venda=("order_date", "min"),
-            data_evento=("event_start_time", "min"),
-        ).reset_index()
+        # Compute each column separately to avoid pandas falling back to Python
+        # min() on object-dtype (date | None) when using dict-agg syntax.
+        _od_min = (
+            df_sel[df_sel["order_date"].notna()]
+            .groupby("event_name")["order_date"]
+            .min()
+            .rename("primeira_venda")
+        )
+        _est_min = (
+            df_sel.groupby("event_name")["event_start_time"]
+            .min()
+            .rename("data_evento")
+        )
+        event_dates = (
+            _est_min.to_frame()
+            .join(_od_min, how="left")
+            .reset_index()
+        )
         if "event_start_time" in df_sel.columns:
             event_dates["dias_de_vendas"] = (
                 event_dates["data_evento"].dt.tz_convert(None).dt.normalize()
