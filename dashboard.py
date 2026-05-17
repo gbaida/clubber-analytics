@@ -480,10 +480,20 @@ if _sb_is_configured():
             st.session_state.pop("sb_refresh_token", None)
             _sb_user = None
 
-    # ── Auth gate ──────────────────────────────────────────────────────────────
-    if _sb_user is None and not st.session_state.get("sb_guest"):
-        _render_login_page()
-        st.stop()
+else:
+    # Supabase não configurado — bloqueia o app em vez de abrir sem auth.
+    # Em produção isso indica que os secrets não foram adicionados ao Streamlit Cloud.
+    st.error(
+        "⚠️ Configuração incompleta: as credenciais do Supabase não foram encontradas.\n\n"
+        "Se você está no **Streamlit Cloud**, acesse:\n"
+        "**Settings → Secrets** e adicione o bloco `[supabase]` com `url`, `key` e `redirect_url`."
+    )
+    st.stop()
+
+# ── Auth gate — sempre ativo quando Supabase está configurado ─────────────────
+if _sb_user is None and not st.session_state.get("sb_guest"):
+    _render_login_page()
+    st.stop()
 
     # ── Migração única: porta_entries.json → DB ────────────────────────────────
     _migrated_flag = PORTA_PATH.with_name("porta_entries.imported.json")
