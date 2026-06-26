@@ -1760,10 +1760,20 @@ with col_main:
 
                 daily = dff.groupby(["order_date", "event_name"]).size().reset_index(name="ingressos")
                 daily["order_date"] = pd.to_datetime(daily["order_date"])
-                fs = daily.groupby("event_name")["order_date"].min().rename("first_sale")
-                daily = daily.merge(fs, on="event_name")
-                daily["dia"] = (daily["order_date"] - daily["first_sale"]).dt.days
+                use_until = "event_start_time" in dff.columns and dff["event_start_time"].notna().any()
+                if use_until:
+                    ev_start = (
+                        dff.groupby("event_name")["event_start_time"].min()
+                        .dt.tz_convert(None).dt.normalize().rename("event_start")
+                    )
+                    daily = daily.merge(ev_start, on="event_name")
+                    daily["dia"] = (daily["event_start"] - daily["order_date"]).dt.days
+                else:
+                    fs = daily.groupby("event_name")["order_date"].min().rename("first_sale")
+                    daily = daily.merge(fs, on="event_name")
+                    daily["dia"] = (daily["order_date"] - daily["first_sale"]).dt.days
                 daily["acumulado"] = daily.groupby("event_name")["ingressos"].cumsum()
+                _x_title = "Dias até o Evento" if use_until else "Dias desde a 1ª Venda"
 
                 ref_d = daily[daily["event_name"] == ref_event]
                 avg_d = (
@@ -1792,10 +1802,12 @@ with col_main:
                 ))
                 fig_day.update_layout(
                     title="Vendas Diárias: Selecionado vs Outros",
-                    xaxis_title="Dias desde a 1ª Venda",
+                    xaxis_title=_x_title,
                     yaxis_title="Ingressos",
                     legend=dict(orientation="h", y=-0.25),
                 )
+                if use_until:
+                    fig_day.update_xaxes(autorange="reversed")
                 col_l3.plotly_chart(fig_day, use_container_width=True)
 
                 fig_cum = go.Figure()
@@ -1817,10 +1829,12 @@ with col_main:
                 ))
                 fig_cum.update_layout(
                     title="Vendas Acumuladas: Selecionado vs Outros",
-                    xaxis_title="Dias desde a 1ª Venda",
+                    xaxis_title=_x_title,
                     yaxis_title="Ingressos Acumulados",
                     legend=dict(orientation="h", y=-0.25),
                 )
+                if use_until:
+                    fig_cum.update_xaxes(autorange="reversed")
                 col_r3.plotly_chart(fig_cum, use_container_width=True)
 
             # ── Receita ao longo do tempo ──────────────────────────────────────
@@ -1830,10 +1844,20 @@ with col_main:
                     .sum().reset_index(name="receita")
                 )
                 daily_rev["order_date"] = pd.to_datetime(daily_rev["order_date"])
-                fs_r = daily_rev.groupby("event_name")["order_date"].min().rename("first_sale")
-                daily_rev = daily_rev.merge(fs_r, on="event_name")
-                daily_rev["dia"] = (daily_rev["order_date"] - daily_rev["first_sale"]).dt.days
+                use_until = "event_start_time" in dff.columns and dff["event_start_time"].notna().any()
+                if use_until:
+                    ev_start_r = (
+                        dff.groupby("event_name")["event_start_time"].min()
+                        .dt.tz_convert(None).dt.normalize().rename("event_start")
+                    )
+                    daily_rev = daily_rev.merge(ev_start_r, on="event_name")
+                    daily_rev["dia"] = (daily_rev["event_start"] - daily_rev["order_date"]).dt.days
+                else:
+                    fs_r = daily_rev.groupby("event_name")["order_date"].min().rename("first_sale")
+                    daily_rev = daily_rev.merge(fs_r, on="event_name")
+                    daily_rev["dia"] = (daily_rev["order_date"] - daily_rev["first_sale"]).dt.days
                 daily_rev["receita_acum"] = daily_rev.groupby("event_name")["receita"].cumsum()
+                _x_title = "Dias até o Evento" if use_until else "Dias desde a 1ª Venda"
 
                 ref_r = daily_rev[daily_rev["event_name"] == ref_event]
                 avg_r = (
@@ -1862,10 +1886,12 @@ with col_main:
                 ))
                 fig_rday.update_layout(
                     title="Receita Diária: Selecionado vs Outros",
-                    xaxis_title="Dias desde a 1ª Venda",
+                    xaxis_title=_x_title,
                     yaxis_title="Receita (BRL)",
                     legend=dict(orientation="h", y=-0.25),
                 )
+                if use_until:
+                    fig_rday.update_xaxes(autorange="reversed")
                 col_l4.plotly_chart(fig_rday, use_container_width=True)
 
                 fig_racum = go.Figure()
@@ -1887,10 +1913,12 @@ with col_main:
                 ))
                 fig_racum.update_layout(
                     title="Receita Acumulada: Selecionado vs Outros",
-                    xaxis_title="Dias desde a 1ª Venda",
+                    xaxis_title=_x_title,
                     yaxis_title="Receita Acumulada (BRL)",
                     legend=dict(orientation="h", y=-0.25),
                 )
+                if use_until:
+                    fig_racum.update_xaxes(autorange="reversed")
                 col_r4.plotly_chart(fig_racum, use_container_width=True)
 
     # ══════════════════════════════════════════════════════════════════════════
