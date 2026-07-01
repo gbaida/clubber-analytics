@@ -3,6 +3,11 @@
 Working reference for `dashboard.py`. Single-file Streamlit app for Shotgun (Brazilian
 ticketing). UI is **100% Brazilian Portuguese**. Display name: **"Clubber Analytics"**.
 
+> **Two versions live in this repo now:**
+> - **v1 (production):** `dashboard.py` — Streamlit, deployed on Streamlit Cloud. Untouched by v2.
+> - **v2:** `backend/` (FastAPI) + `frontend/` (Alpine.js + ECharts, no build). All 6 analytics
+>   tabs ported (Porta tab still deferred). See the **v2 Architecture** section at the bottom.
+
 > ⚠️ Line numbers drift as the file is edited. Treat them as approximate anchors —
 > confirm with a quick grep before relying on a specific line.
 
@@ -112,7 +117,8 @@ Reference event highlighted orange `#FF7F0E`; others muted `#AAAAAA`.
 > Charts 5–8 use x-axis **"Dias até o Evento"** (days until event =
 > `event_start_date − order_date`, event day = 0 on the right via reversed axis).
 > Falls back to "Dias desde a 1ª Venda" only if `event_start_time` is absent.
-> The Vendas tab (charts 1–2) still uses "Dias desde a 1ª Venda" for multi-event.
+> The Vendas tab charts 1–2 use the same "Dias até o Evento" convention for multi-event
+> (in **both** v1 and v2); single-event Vendas stays on calendar dates.
 
 ## Conventions (strict)
 
@@ -127,3 +133,85 @@ Reference event highlighted orange `#FF7F0E`; others muted `#AAAAAA`.
 - **Conditional logic:** many charts hide/show on `len(sel_events)` (single vs multi event).
   Color palette constant: `COLORS`.
 - Match existing Plotly/Streamlit patterns already in the file.
+
+---
+
+# v2 Architecture (FastAPI + Alpine/ECharts)
+
+Second version: keeps Python as a data **backend**, replaces Streamlit UI with a custom
+front-end. `dashboard.py` (v1) is left fully intact and still runs on Streamlit Cloud.
+
+## Run v2 locally
+```bash
+pip install -r backend/requirements.txt
+cd backend && python -m uvicorn main:app --reload --port 8000 --host 127.0.0.1
+# open http://127.0.0.1:8000  (FastAPI serves the static frontend/ too)
+```
+**Config:** `supa.py` reads `SUPABASE_URL` / `SUPABASE_ANON_KEY` from the environment, and
+falls back to a **gitignored `backend/.env`** (auto-loaded by `supa._load_dotenv()`, no
+python-dotenv dependency). Real env vars win over the file. So local restarts need no keys —
+just keep `backend/.env` present:
+```
+SUPABASE_URL=https://<ref>.supabase.co
+SUPABASE_ANON_KEY=<anon public key>
+```
+The anon key is the **public** browser key (safe to store locally); it is NOT a session token.
+
+Syntax check: `python -c "import ast,pathlib; ast.parse(pathlib.Path('backend/charts.py').read_text(encoding='utf-8'))"`
+
+> **Origin gotcha:** localStorage (and the supabase session) is per-origin. Pick ONE of
+> `127.0.0.1:8000` / `localhost:8000` and stick to it, and list it in Supabase → Auth →
+> Redirect URLs, or logins won't persist across refresh.
+
+## Layout
+- `backend/core.py` — pure data fns copied verbatim from dashboard.py (no Streamlit):
+  `fetch_tickets_from_api`, `process`, `_sanitize_record`, PagBank + Porta helpers, `COLORS`, `_DOW_MAP`.
+- `backend/supa.py` — config via env vars **+ `backend/.env` fallback** (`_load_dotenv()`);
+  `get_user(jwt)` validates token; `client_for(jwt)` runs RLS-scoped queries with the user's
+  JWT; ticket select/upsert/delete + porta load.
+- `backend/charts.py` — **the port of all Streamlit tab aggregations** → JSON. Functions:
+  `build_df`, `apply_filters` (mirrors dashboard.py 990-1001), `compute_kpis`, `data_summary`,
+  and one payload builder per tab:
+  - `vendas_payload` — 6 visuals (Vendas charts 1–2 use "Dias até o Evento" multi-event).
+  - `comparar_payload` — KPIs + 8 charts, incl. "Dias até o Evento" evolution via
+    `_comparar_evolution` / `_add_dia`.
+  - `receita_payload` — Receita por Evento (multi), por Categoria, Tipos Gratuitos, por Método
+    de Pagamento, Gratuitos vs Pagos (donut), Receita Diária (single-event only).
+  - `marketing_payload` — Canal de Aquisição (h-bar), Canal × Meio (stacked), Canal × Evento (multi).
+  - `audience_payload` — Gênero, Idade (hist), Top 15 Cidades, Newsletter, Recorrentes (multi),
+    Top 10 Fiéis (multi), Idade × Gênero.
+  - `operacoes_payload` — Comparecimento (Pago/Gratuito × Presente/Ausente, `_SCAN_COLORS`),
+    Cancelamento, Status, Mix de Categorias. Note: cancelamento/status use `df_sel`
+    (includes canceled tickets), the rest use `dff` (Shotgun, non-canceled).
+- `backend/main.py` — FastAPI. Routes: `GET /api/config` (public), `/api/me`,
+  `POST /api/tickets/fetch`, `DELETE /api/tickets`, `/api/data/summary`, `/api/kpis`, and
+  `/api/charts/{vendas,comparar,receita,marketing,audience,operacoes}`. The 4 tab endpoints
+  share the `_filtered()` prelude (load → resolve events → `apply_filters`). Static mount serves
+  `frontend/` — **defined last**, after all `@app.get`s, or the `/` catch-all swallows them.
+  Auth = `Authorization: Bearer <jwt>` via `current_user` dependency.
+- `frontend/` — `index.html` (Alpine root), `css/styles.css` (dark theme),
+  `js/auth.js` (supabase-js Google OAuth — native session, no PKCE hacks),
+  `js/api.js`, `js/store.js` (Alpine `app` component; `renderActive()` dispatches per tab),
+  `js/charts/{base,vendas,comparar,receita,marketing,audience,operacoes}.js` (map payload →
+  ECharts). All libs via CDN; **no build step**. Chart titles live in HTML `<h3>` card headers,
+  NOT in ECharts options (avoids overlap with the y-axis unit label; keep `grid.top` ≈ 34).
+
+## Data flow
+supabase-js login → JWT → backend validates → loads user's `shotgun_tickets` from DB →
+`process()` → `apply_filters` → aggregate → JSON → ECharts. Dataset re-loaded per request
+(per-user in-memory cache is a future optimization).
+
+## Status / out of scope
+- **Done:** scaffold, auth, KPI header, sidebar filters, and **all 6 analytics tabs**
+  end-to-end — Comparar, Vendas, Receita, Marketing, Público, Operações.
+- **Deferred:** the 🚪 **Porta** tab (Porta/PagBank UI + CSV upload — functions extracted in
+  `core.py`/`supa.py`, not yet wired to an endpoint or tab); guest mode (v2 requires Google login);
+  per-user in-memory dataset cache (currently re-loaded per request).
+- **Parity caveats vs v1 Plotly:** age charts are binned server-side (per-integer-age 16–80);
+  "Idade × Gênero" is a stacked bar (v1 used overlay); a few multi-event-only cards
+  (`r-diaria-card`, `m-canal-evento-card`, `a-recorrentes-card`, `a-top-card`) hide themselves
+  via `display:none` when their payload key is absent.
+
+## Deploy v2 (NOT Streamlit Cloud)
+Single service on Render/Railway: FastAPI serves API + static front-end. Set `SUPABASE_URL` /
+`SUPABASE_ANON_KEY` env vars. Add the deploy domain to Supabase → Auth → Redirect URLs.

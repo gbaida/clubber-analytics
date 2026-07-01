@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Clubber Analytics</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/css/styles.css" />
+</head>
+<body x-data="app" x-init="init()">
+
+  <!-- loading -->
+  <div x-show="!ready" class="hint">Carregando…</div>
+
+  <!-- login -->
+  <div x-cloak x-show="ready && !user" class="login-wrap">
+    <div class="login-card">
+      <h1>🎟️ Clubber Analytics</h1>
+      <p>Painel de análise de eventos.</p>
+      <button class="btn btn-primary" @click="signIn()">🔑 Entrar com Google</button>
+    </div>
+  </div>
+
+  <!-- app -->
+  <div x-cloak x-show="ready && user" class="app">
+
+    <!-- ── sidebar ── -->
+    <aside class="sidebar">
+      <div class="brand">
+        <span style="font-size:22px">🎟️</span>
+        <div><h2>Clubber Analytics</h2><small>feito por ponkan</small></div>
+      </div>
+
+      <div class="user-row">
+        <span class="email" x-text="user?.email"></span>
+        <button class="btn btn-ghost btn-sm" @click="signOut()">Sair</button>
+      </div>
+
+      <div class="section-title">Buscar via API</div>
+      <div class="field">
+        <label>ID do Organizador</label>
+        <input class="input" type="text" x-model="orgId" placeholder="organizer_id" />
+      </div>
+      <div class="field">
+        <label>Token de API</label>
+        <input class="input" type="password" x-model="apiToken" placeholder="Bearer token" />
+      </div>
+      <button class="btn btn-primary" :class="{ loading: busy }" @click="fetchData()"
+              x-text="busy ? 'Buscando…' : '🔄 Buscar Dados'"></button>
+      <button x-show="hasData" class="btn btn-ghost btn-sm" @click="clearData()">🚪 Limpar dados</button>
+
+      <template x-if="hasData">
+        <div style="display:flex;flex-direction:column;gap:12px">
+          <div class="section-title">Eventos</div>
+          <div class="row">
+            <button class="btn btn-ghost btn-sm btn-block" @click="selectAll()">✅ Todos</button>
+            <button class="btn btn-ghost btn-sm btn-block" @click="selectNone()">☐ Nenhum</button>
+          </div>
+          <div class="event-list">
+            <template x-for="ev in summary.events" :key="ev">
+              <label class="check">
+                <input type="checkbox" :checked="isSelected(ev)" @change="toggleEvent(ev)" />
+                <span x-text="ev"></span>
+              </label>
+            </template>
+          </div>
+
+          <div class="section-title">Período de compra</div>
+          <div class="field">
+            <input class="input" type="date" x-model="filters.dateFrom" @change="refresh()" />
+          </div>
+          <div class="field">
+            <input class="input" type="date" x-model="filters.dateTo" @change="refresh()" />
+          </div>
+        </div>
+      </template>
+
+      <div class="spacer"></div>
+    </aside>
+
+    <!-- ── main ── -->
+    <main class="main">
+
+      <template x-if="!hasData">
+        <div class="hint">
+          Nenhum dado carregado ainda.<br />
+          Informe o ID do organizador e o token de API na barra lateral e clique em <b>Buscar Dados</b>.
+          <div style="margin-top:16px">
+            <button class="btn btn-ghost btn-sm" style="display:inline-block;width:auto" @click="loadData()">🔄 Recarregar</button>
+          </div>
+        </div>
+      </template>
+
+      <template x-if="hasData">
+        <div>
+          <div class="page-title">Visão Geral</div>
+
+          <!-- KPI header 2×3 -->
+          <div class="kpis">
+            <div class="kpi"><div class="label">Ingressos Vendidos</div><div class="value" x-text="kpis.ingressos.toLocaleString('pt-BR')"></div></div>
+            <div class="kpi"><div class="label">Participantes Únicos</div><div class="value" x-text="kpis.participantes.toLocaleString('pt-BR')"></div></div>
+            <div class="kpi"><div class="label">Receita Total</div><div class="value" x-text="fmtMoney(kpis.receita)"></div></div>
+            <div class="kpi"><div class="label">Taxa de Comparecimento</div><div class="value" x-text="kpis.comparecimento + '%'"></div></div>
+            <div class="kpi"><div class="label">Taxa de Cancelamento</div><div class="value" x-text="kpis.cancelamento + '%'"></div></div>
+            <div class="kpi"><div class="label">Opt-in Newsletter</div><div class="value" x-text="kpis.newsletter + '%'"></div></div>
+          </div>
+
+          <!-- tabs -->
+          <div class="tabs">
+            <button class="tab" :class="{ active: activeTab==='comparar' }" @click="setTab('comparar')">📊 Comparar</button>
+            <button class="tab" :class="{ active: activeTab==='vendas' }" @click="setTab('vendas')">📈 Vendas</button>
+            <button class="tab" :class="{ active: activeTab==='receita' }" @click="setTab('receita')">💰 Receita</button>
+            <button class="tab" :class="{ active: activeTab==='marketing' }" @click="setTab('marketing')">📣 Marketing</button>
+            <button class="tab" :class="{ active: activeTab==='publico' }" @click="setTab('publico')">👥 Público</button>
+            <button class="tab" :class="{ active: activeTab==='operacoes' }" @click="setTab('operacoes')">🔍 Operações</button>
+          </div>
+
+          <!-- ── COMPARAR ── -->
+          <section x-show="activeTab==='comparar'">
+            <template x-if="filters.events.length < 2">
+              <div class="hint">Selecione pelo menos 2 eventos na barra lateral para comparar.</div>
+            </template>
+            <div x-show="filters.events.length >= 2">
+              <div class="field" style="max-width:320px;margin-bottom:16px">
+                <label>Evento de referência</label>
+                <select class="input" x-model="filters.refEvent" @change="renderActive()">
+                  <template x-for="ev in filters.events" :key="ev">
+                    <option :value="ev" x-text="ev"></option>
+                  </template>
+                </select>
+              </div>
+
+              <div class="kpis" style="grid-template-columns:repeat(4,1fr)">
+                <div class="kpi" id="ck-ing"><div class="label">Ingressos Vendidos</div><div class="value">—</div><div class="delta" style="font-size:12px"></div></div>
+                <div class="kpi" id="ck-rec"><div class="label">Receita Total</div><div class="value">—</div><div class="delta" style="font-size:12px"></div></div>
+                <div class="kpi" id="ck-pag"><div class="label">% Ingressos Pagos</div><div class="value">—</div><div class="delta" style="font-size:12px"></div></div>
+                <div class="kpi" id="ck-cmp"><div class="label">Taxa de Comparecimento</div><div class="value">—</div><div class="delta" style="font-size:12px"></div></div>
+              </div>
+
+              <div class="grid-2">
+                <div class="chart-card"><h3>Receita por Evento</h3><div id="c-receita" class="chart"></div></div>
+                <div class="chart-card"><h3>Ingressos Vendidos por Evento</h3><div id="c-ingressos" class="chart"></div></div>
+                <div class="chart-card"><h3>Primeira Vez vs Recorrente por Evento</h3><div id="c-fidelidade" class="chart"></div></div>
+                <div class="chart-card"><h3>Ingressos: Pago vs Gratuito</h3><div id="c-pagogratuito" class="chart"></div></div>
+                <div class="chart-card"><h3>Vendas Diárias: Selecionado vs Outros</h3><div id="c-vendas-diaria" class="chart"></div></div>
+                <div class="chart-card"><h3>Vendas Acumuladas: Selecionado vs Outros</h3><div id="c-vendas-acum" class="chart"></div></div>
+                <div class="chart-card"><h3>Receita Diária: Selecionado vs Outros</h3><div id="c-receita-diaria" class="chart"></div></div>
+                <div class="chart-card"><h3>Receita Acumulada: Selecionado vs Outros</h3><div id="c-receita-acum" class="chart"></div></div>
+              </div>
+            </div>
+          </section>
+
+          <!-- ── VENDAS ── -->
+          <section x-show="activeTab==='vendas'">
+            <div class="grid-2">
+              <div class="chart-card"><h3>Vendas Diárias por Evento</h3><div id="v-diarias" class="chart"></div></div>
+              <div class="chart-card"><h3>Vendas Acumuladas de Ingressos</h3><div id="v-acumulado" class="chart"></div></div>
+              <div class="chart-card"><h3>Vendas por Dia da Semana</h3><div id="v-dow" class="chart"></div></div>
+              <div class="chart-card"><h3>Quando as Pessoas Compraram?</h3><div id="v-quando" class="chart"></div></div>
+            </div>
+            <div class="grid-1" style="margin-top:16px">
+              <div class="chart-card"><h3>Mapa de Calor: Dia da Semana × Hora</h3><div id="v-heat" class="chart tall"></div></div>
+            </div>
+            <div class="table-card" style="margin-top:16px">
+              <h3>Resumo por Evento</h3>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Evento</th><th>Total</th><th>Válidos</th><th>Cancelados</th>
+                    <th>Comparecimento</th><th>Receita</th><th>Dias de Venda</th>
+                    <th>Taxa de Comp.</th><th>Taxa de Canc.</th>
+                  </tr>
+                </thead>
+                <tbody id="v-resumo-body"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <!-- ── RECEITA ── -->
+          <section x-show="activeTab==='receita'">
+            <div class="grid-2">
+              <div class="chart-card" x-show="multi"><h3>Receita por Evento</h3><div id="r-evento" class="chart"></div></div>
+              <div class="chart-card"><h3>Receita por Categoria de Ingresso</h3><div id="r-categoria" class="chart"></div></div>
+              <div class="chart-card"><h3>Tipos de Ingresso Gratuito</h3><div id="r-gratuito" class="chart"></div></div>
+              <div class="chart-card"><h3>Receita por Método de Pagamento</h3><div id="r-pagamento" class="chart"></div></div>
+              <div class="chart-card"><h3>Ingressos Gratuitos vs Pagos</h3><div id="r-tipo" class="chart"></div></div>
+              <div class="chart-card" id="r-diaria-card"><h3>Receita Diária ao Longo do Tempo</h3><div id="r-diaria" class="chart"></div></div>
+            </div>
+          </section>
+
+          <!-- ── MARKETING ── -->
+          <section x-show="activeTab==='marketing'">
+            <div class="grid-2">
+              <div class="chart-card"><h3>Ingressos por Canal de Aquisição</h3><div id="m-canal" class="chart"></div></div>
+              <div class="chart-card"><h3>Canal × Meio (App vs Web)</h3><div id="m-canal-meio" class="chart"></div></div>
+            </div>
+            <div class="grid-1" style="margin-top:16px">
+              <div class="chart-card" id="m-canal-evento-card"><h3>Performance por Canal e Evento</h3><div id="m-canal-evento" class="chart tall"></div></div>
+            </div>
+          </section>
+
+          <!-- ── PÚBLICO ── -->
+          <section x-show="activeTab==='publico'">
+            <div class="grid-2">
+              <div class="chart-card"><h3>Gênero do Público</h3><div id="a-genero" class="chart"></div></div>
+              <div class="chart-card"><h3>Distribuição de Idade</h3><div id="a-idade" class="chart"></div></div>
+              <div class="chart-card"><h3>Top 15 Cidades</h3><div id="a-cidades" class="chart"></div></div>
+              <div class="chart-card"><h3>Taxa de Opt-in Newsletter</h3><div id="a-newsletter" class="chart"></div></div>
+              <div class="chart-card" id="a-recorrentes-card"><h3>Participantes Recorrentes</h3><div id="a-recorrentes" class="chart"></div></div>
+              <div class="chart-card" id="a-top-card"><h3>Top 10 — Participantes Mais Fiéis</h3><div id="a-top" class="chart"></div></div>
+            </div>
+            <div class="grid-1" style="margin-top:16px">
+              <div class="chart-card"><h3>Distribuição de Idade por Gênero</h3><div id="a-idade-genero" class="chart tall"></div></div>
+            </div>
+          </section>
+
+          <!-- ── OPERAÇÕES ── -->
+          <section x-show="activeTab==='operacoes'">
+            <div class="grid-2">
+              <div class="chart-card"><h3>Comparecimento por Evento</h3><div id="o-comparecimento" class="chart"></div></div>
+              <div class="chart-card"><h3>Taxa de Cancelamento por Evento</h3><div id="o-cancelamento" class="chart"></div></div>
+              <div class="chart-card"><h3>Distribuição por Status de Ingresso</h3><div id="o-status" class="chart"></div></div>
+              <div class="chart-card"><h3>Mix de Categorias por Evento</h3><div id="o-mix" class="chart"></div></div>
+            </div>
+          </section>
+        </div>
+      </template>
+    </main>
+  </div>
+
+  <!-- toast -->
+  <div x-cloak x-show="toast" class="toast" x-text="toast"></div>
+
+  <!-- libs -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+  <!-- app -->
+  <script src="/js/auth.js"></script>
+  <script src="/js/api.js"></script>
+  <script src="/js/charts/base.js"></script>
+  <script src="/js/charts/vendas.js"></script>
+  <script src="/js/charts/comparar.js"></script>
+  <script src="/js/charts/receita.js"></script>
+  <script src="/js/charts/marketing.js"></script>
+  <script src="/js/charts/audience.js"></script>
+  <script src="/js/charts/operacoes.js"></script>
+  <script src="/js/store.js"></script>
+  <!-- alpine last (defer) so alpine:init listener is registered first -->
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"></script>
+</body>
+</html>

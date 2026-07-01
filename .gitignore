@@ -1,0 +1,6 @@
+# Local backend secrets (Supabase creds)
+backend/.env
+
+# Python bytecode
+__pycache__/
+*.pyc
