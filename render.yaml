@@ -1,0 +1,20 @@
+# Render Blueprint for Clubber Analytics v2 (FastAPI + static frontend).
+# One persistent web service: uvicorn serves the API and the frontend/ from a
+# single origin. Points at backend/ so the root requirements.txt (Streamlit v1)
+# is ignored. Set SUPABASE_URL / SUPABASE_ANON_KEY in the Render dashboard.
+services:
+  - type: web
+    name: clubber-analytics
+    runtime: python
+    rootDir: backend
+    plan: free                      # upgrade to "starter" ($7/mo) to remove idle spin-down
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/config    # public route, returns 200
+    envVars:
+      - key: SUPABASE_URL
+        sync: false                 # set in dashboard (kept out of the repo)
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: PYTHON_VERSION
+        value: 3.12.6               # pin; local is 3.13, wheels are safest on 3.12
